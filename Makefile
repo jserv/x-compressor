@@ -1,70 +1,44 @@
-CFLAGS+=-std=c99 -pedantic -Wall -Wextra
-LDFLAGS+=
-LDLIBS+=
+CC ?= gcc
+CFLAGS := -O -g -Wall
 
-BINDIR?=$(DESTDIR)$(PREFIX)/usr/bin
+include mk/common.mk
 
-BIN=x unx
+EXEC = x unx
 
-ifeq ($(BUILD),debug)
-	CFLAGS+=-Og -g
-	LDFLAGS+=-rdynamic
-endif
+OBJS := libx.o x.o
+deps := $(OBJS:%.o=%.o.d)
 
-ifeq ($(BUILD),release)
-	CFLAGS+=-march=native -O3 -DNDEBUG
-endif
+all: $(EXEC)
 
-ifeq ($(BUILD),profile-generate)
-	CFLAGS+=-march=native -O3 -DNDEBUG -fprofile-generate
-	LDFLAGS+=-fprofile-generate
-endif
-
-ifeq ($(BUILD),profile-use)
-	CFLAGS+=-march=native -O3 -DNDEBUG -fprofile-use
-endif
-
-ifeq ($(BUILD),profile)
-	CFLAGS+=-Og -g -pg
-	LDFLAGS+=-rdynamic -pg
-endif
-
-.PHONY: all
-all: $(BIN)
-
-x: x.o libx.o
-
-libx.o: libx.c libx.h
+x: $(OBJS)
+	$(VECHO) "  LD\t$@\n"
+	$(Q)$(CC) $(OBJS) -o $@
 
 unx: x
-	ln -s $< $@
+	$(VECHO)  "  LN\t$@\n"
+	$(Q)ln -s $< $@
+
+%.o: %.c
+	$(VECHO) "  CC\t$@\n"
+	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF .$@.d $<
+
+TESTDATA = 74-0.txt
+74-0.txt:
+	$(VECHO) "  Downloading The Adventures of Tom Sawyer by Mark Twain... "
+	$(Q)wget -q https://www.gutenberg.org/files/74/74-0.txt
+	$(Q)$(call pass,$@)
+
+check: $(TESTDATA) $(EXEC)
+	$(Q)./x < $< > $<.compressed
+	$(Q)./unx < $<.compressed > $<.restore
+	$(Q)diff $< $<.restore
+	$(Q)$(RM) $<.compressed $<.restore
+	$(Q)$(call pass,$(EXEC))
 
 .PHONY: clean
 clean:
-	-$(RM) -- *.o $(BIN)
-
-.PHONY: distclean
+	-$(RM) $(OBJS) $(EXEC) $(deps)
 distclean: clean
-	-$(RM) -- *.gcda gmon.out cachegrind.out.* callgrind.out.*
+	-$(RM) $(TESTDATA)
 
-.PHONY: build-pgo
-build-pgo:
-	$(MAKE) distclean all BUILD=profile-generate
-	./x -f -1 libx.c
-	./unx -f libx.c.x libx.c.x.out
-	diff libx.c libx.c.x.out
-	$(MAKE) clean all BUILD=profile-use
-	-$(RM) -- libx.c.x libx.c.x.out
-
-.PHONY: check
-check: all
-	./x -f libx.c
-	./unx -f libx.c.x libx.c.x.out
-	diff libx.c libx.c.x.out
-	-$(RM) -- libx.c.x libx.c.x.out
-
-.PHONY: install
-install: all
-	install -d $(BINDIR)
-	install -m 755 x $(BINDIR)
-	cp -d unx $(BINDIR)
+-include $(deps)

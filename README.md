@@ -1,18 +1,13 @@
-x &ndash; minimalist data compressor
-====================================
+# x &ndash; minimalist data compressor
 
-[![Build Status](https://travis-ci.org/xbarin02/x-compressor.svg?branch=master)](https://travis-ci.org/xbarin02/x-compressor)
-
-Why?
-----
+## Why?
 
 Because readable and maintainable code is key.
 The **x** is an easily verifiable and portable lossless data compressor.
-Source codes count 700 lines in total.
-A core library is less than 400 lines in pure C.
+Source codes count 320 lines in total.
+A core library is less than 250 lines in pure C.
 
-Benchmarks
-----------
+## Benchmarks
 
 Benchmark evaluates the compression of the reference [enwik8] file.
 All compressors have been compiled with GCC 9.2 on 64-bit Linux.
@@ -29,55 +24,43 @@ Bold font indicates the best result.
 | ----------               | -----    | ----------------: | ------------------: | ----:   |
 | lz4 1.9.2                | 1.75     | **0.29**          | **0.11**            |  20 619 |
 | lzop 1.04                | 1.78     | 0.36              | 0.33                |  17 123 |
-| **x**                    | 1.88     | 1.03              | 0.91                | **700** |
+| **x**                    | 1.88     | 1.03              | 0.91                | **320** |
 | gzip 1.9                 | 2.74     | 4.69              | 0.63                |  48 552 |
 | zstd 1.3.7               | 2.80     | 0.55              | 0.18                | 111 948 |
 | bzip2 1.0.6              | 3.45     | 7.39              | 3.36                |   8 117 |
 | xz 5.2.4                 | 3.79     | 53.70             | 1.40                |  43 534 |
 | brotli 1.0.7             | **3.88** | 3:05.59           | 0.34                |  35 372 |
 
-The algorithm
--------------
+## Algorithms
 
-The **x** uses an adaptive Golomb-Rice coding based on context modeling.
+The **x** uses an adaptive [Golomb-Rice coding](https://en.wikipedia.org/wiki/Golomb_coding) based on context modeling.
 The context model uses a single previous byte in the uncompressed stream to predict the next byte.
-The compressor can switch between fast compression mode (default) and multi-pass high compression mode.
 
-How to build?
--------------
+## Build
 
+Compile the library and sample application:
 ```
-make BUILD=release
-```
-
-or
-
-```
-make build-pgo
+$ make
 ```
 
-How to use?
------------
+Run simple test:
+```
+$ make check
+```
+
+## Usage
 
 Compress:
-
 ```
-./x INPUT-FILE [OUTPUT-FILE]
+$ ./x < INPUT-FILE > OUTPUT-FILE
 ```
 
 Decompress:
-
 ```
-./unx INPUT-FILE [OUTPUT-FILE]
+$ ./unx < INPUT-FILE > OUTPUT-FILE
 ```
 
-Authors
--------
-
-- David Barina, <ibarina@fit.vutbr.cz>
-
-License
--------
+## License
 
 This project is licensed under the MIT License.
 See the [LICENSE.md](LICENSE.md) file for details.

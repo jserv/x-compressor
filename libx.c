@@ -1,396 +1,367 @@
-#include "libx.h"
-
 #include <assert.h>
 #include <stdint.h>
 
-enum {
-	BIO_MODE_READ,
-	BIO_MODE_WRITE
-};
+#include "libx.h"
 
-struct bio {
-	uint32_t *ptr; /* pointer to memory */
-	void *end;
-	uint32_t b;    /* bit buffer */
-	size_t c;      /* bit counter */
-};
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+
+enum { READ_MODE, WRITE_MODE };
+
+/* I/O abstraction layer */
+typedef struct {
+    uint32_t *ptr; /* pointer to memory */
+    void *end;
+    uint32_t b; /* bit buffer */
+    size_t c;   /* bit counter */
+} generic_io_t;
 
 static struct context {
-	size_t freq[256];          /* char -> frequency */
-	unsigned char sorted[256]; /* index -> char */
-	unsigned char order[256];  /* char -> index */
+    size_t freq[256];    /* char -> frequency */
+    uint8_t sorted[256]; /* index -> char */
+    uint8_t order[256];  /* char -> index */
 } table[256];
 
 static size_t opt_k;
 static size_t symbol_sum, symbol_count; /* mean = symbol_sum / symbol_count */
 
-#define RESET_INTERVAL 256 /* recompute Golomb-Rice codes after... */
+/* Recompute Golomb-Rice codes after... */
+#define RESET_INTERVAL 256
 
-static void bio_open(struct bio *bio, void *ptr, void *end, int mode)
+static void initiate(generic_io_t *io, void *ptr, void *end, int mode)
 {
-	assert(bio != NULL);
+    assert(io != NULL);
 
-	bio->ptr = ptr;
-	bio->end = (char *)end - 3;
+    io->ptr = ptr;
+    io->end = end ? (char *) end - 3 : NULL;
 
-	if (mode == BIO_MODE_READ) {
-		bio->c = 32;
-	} else {
-		bio->b = 0;
-		bio->c = 0;
-	}
+    if (mode == READ_MODE) {
+        io->c = 32;
+    } else {
+        io->b = 0;
+        io->c = 0;
+    }
 }
 
-static void bio_flush_buffer(struct bio *bio)
+static void flush_buffer(generic_io_t *io)
 {
-	assert(bio != NULL);
-	assert(bio->ptr != NULL);
+    assert(io != NULL);
+    assert(io->ptr != NULL);
 
-	*(bio->ptr++) = bio->b;
-	bio->b = 0;
-	bio->c = 0;
+    *(io->ptr++) = io->b;
+    io->b = 0;
+    io->c = 0;
 }
 
-static void bio_reload_buffer(struct bio *bio)
+static void reload_buffer(generic_io_t *io)
 {
-	assert(bio != NULL);
-	assert(bio->ptr != NULL);
+    assert(io != NULL);
+    assert(io->ptr != NULL);
 
-	if ((void *)bio->ptr < bio->end) {
-		bio->b = *(bio->ptr++);
-	} else {
-		bio->b = 0x80000000;
-	}
+    if ((void *) io->ptr < io->end)
+        io->b = *(io->ptr++);
+    else
+        io->b = 0x80000000;
 
-	bio->c = 0;
+    io->c = 0;
 }
 
-static void bio_put_nonzero_bit(struct bio *bio)
+static void put_nonzero_bit(generic_io_t *io)
 {
-	assert(bio != NULL);
-	assert(bio->c < 32);
+    assert(io != NULL);
+    assert(io->c < 32);
 
-	bio->b |= (uint32_t)1 << bio->c;
-	bio->c++;
+    io->b |= (uint32_t) 1 << io->c;
+    io->c++;
 
-	if (bio->c == 32) {
-		bio_flush_buffer(bio);
-	}
+    if (io->c == 32)
+        flush_buffer(io);
 }
 
-static size_t minsize(size_t a, size_t b)
+/* Count trailing zeros */
+static inline size_t ctzu32(uint32_t n)
 {
-	return a < b ? a : b;
-}
+    if (n == 0)
+        return 32;
 
-static size_t ctzu32(uint32_t n)
-{
-	if (n == 0) {
-		return 32;
-	}
-
-	switch (sizeof(uint32_t)) {
-		static const int lut[32] = {
-			0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
-			31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
-		};
 #ifdef __GNUC__
-		case sizeof(unsigned):
-			return __builtin_ctz((unsigned)n);
-		case sizeof(unsigned long):
-			return __builtin_ctzl((unsigned long)n);
+    return __builtin_ctz((unsigned) n);
 #endif
-		default:
-			/* http://graphics.stanford.edu/~seander/bithacks.html */
-			return lut[((uint32_t)((n & -n) * 0x077CB531U)) >> 27];
-	}
+
+    /* If we can not access hardware ctz, use branch-less algorithm
+     * http://graphics.stanford.edu/~seander/bithacks.html
+     */
+    static const int lut[32] = {0,  1,  28, 2,  29, 14, 24, 3,  30, 22, 20,
+                                15, 25, 17, 4,  8,  31, 27, 13, 23, 21, 19,
+                                16, 7,  26, 12, 18, 6,  11, 5,  10, 9};
+    /* http://graphics.stanford.edu/~seander/bithacks.html */
+    return lut[((uint32_t)((n & -n) * 0x077CB531U)) >> 27];
 }
 
-static void bio_write_bits(struct bio *bio, uint32_t b, size_t n)
+static void write_bits(generic_io_t *io, uint32_t b, size_t n)
 {
-	assert(n <= 32);
+    assert(n <= 32);
 
-	for (int i = 0; i < 2; ++i) {
-		assert(bio->c < 32);
+    for (int i = 0; i < 2; ++i) {
+        assert(io->c < 32);
 
-		size_t m = minsize(32 - bio->c, n);
+        size_t m = MIN(32 - io->c, n);
 
-		bio->b |= (b & (((uint32_t)1 << m) - 1)) << bio->c;
-		bio->c += m;
+        io->b |= (b & (((uint32_t) 1 << m) - 1)) << io->c;
+        io->c += m;
 
-		if (bio->c == 32) {
-			bio_flush_buffer(bio);
-		}
+        if (io->c == 32)
+            flush_buffer(io);
 
-		b >>= m;
-		n -= m;
+        b >>= m;
+        n -= m;
 
-		if (n == 0) {
-			return;
-		}
-	}
+        if (n == 0)
+            return;
+    }
 }
 
-static void bio_write_zero_bits(struct bio *bio, size_t n)
+static void write_zero_bits(generic_io_t *io, size_t n)
 {
-	assert(n <= 32);
+    assert(n <= 32);
 
-	for (size_t m; n > 0; n -= m) {
-		assert(bio->c < 32);
+    for (size_t m; n > 0; n -= m) {
+        assert(io->c < 32);
 
-		m = minsize(32 - bio->c, n);
+        m = MIN(32 - io->c, n);
 
-		bio->c += m;
+        io->c += m;
 
-		if (bio->c == 32) {
-			bio_flush_buffer(bio);
-		}
-	}
+        if (io->c == 32)
+            flush_buffer(io);
+    }
 }
 
-static uint32_t bio_read_bits(struct bio *bio, size_t n)
+static uint32_t read_bits(generic_io_t *io, size_t n)
 {
-	if (bio->c == 32) {
-		bio_reload_buffer(bio);
-	}
+    if (io->c == 32)
+        reload_buffer(io);
 
-	/* get the avail. least-significant bits */
-	size_t s = minsize(32 - bio->c, n);
+    /* Get the available least-significant bits */
+    size_t s = MIN(32 - io->c, n);
 
-	uint32_t w = bio->b & (((uint32_t)1 << s) - 1);
+    uint32_t w = io->b & (((uint32_t) 1 << s) - 1);
 
-	bio->b >>= s;
-	bio->c += s;
+    io->b >>= s;
+    io->c += s;
 
-	n -= s;
+    n -= s;
 
-	/* need more bits? reload & get the most-significant bits */
-	if (n > 0) {
-		assert(bio->c == 32);
+    /* Need more bits? If so, reload and get the most-significant bits */
+    if (n > 0) {
+        assert(io->c == 32);
 
-		bio_reload_buffer(bio);
+        reload_buffer(io);
 
-		w |= (bio->b & (((uint32_t)1 << n) - 1)) << s;
+        w |= (io->b & (((uint32_t) 1 << n) - 1)) << s;
 
-		bio->b >>= n;
-		bio->c += n;
-	}
+        io->b >>= n;
+        io->c += n;
+    }
 
-	return w;
+    return w;
 }
 
-static void bio_close(struct bio *bio, int mode)
+static void finalize(generic_io_t *io, int mode)
 {
-	assert(bio != NULL);
+    assert(io != NULL);
 
-	if (mode == BIO_MODE_WRITE && bio->c > 0) {
-		bio_flush_buffer(bio);
-	}
+    if (mode == WRITE_MODE && io->c > 0)
+        flush_buffer(io);
 }
 
-static void bio_write_unary(struct bio *bio, uint32_t N)
+static void write_unary(generic_io_t *io, uint32_t N)
 {
-	for (; N > 32; N -= 32) {
-		bio_write_zero_bits(bio, 32);
-	}
+    for (; N > 32; N -= 32)
+        write_zero_bits(io, 32);
 
-	bio_write_zero_bits(bio, N);
+    write_zero_bits(io, N);
 
-	bio_put_nonzero_bit(bio);
+    put_nonzero_bit(io);
 }
 
-static uint32_t bio_read_unary(struct bio *bio)
+static uint32_t read_unary(generic_io_t *io)
 {
-	/* get zeros... */
-	uint32_t total_zeros = 0;
+    uint32_t total_zeros = 0;
 
-	assert(bio != NULL);
+    assert(io != NULL);
 
-	do {
-		if (bio->c == 32) {
-			bio_reload_buffer(bio);
-		}
+    do {
+        if (io->c == 32)
+            reload_buffer(io);
 
-		/* get trailing zeros */
-		size_t s = minsize(32 - bio->c, ctzu32(bio->b));
+        /* Get trailing zeros */
+        size_t s = MIN(32 - io->c, ctzu32(io->b));
 
-		bio->b >>= s;
-		bio->c += s;
+        io->b >>= s;
+        io->c += s;
 
-		total_zeros += s;
-	} while (bio->c == 32);
+        total_zeros += s;
+    } while (io->c == 32);
 
-	/* ...and drop non-zero bit */
-	assert(bio->c < 32);
+    /* ...and drop non-zero bit */
+    assert(io->c < 32);
 
-	bio->b >>= 1;
-	bio->c++;
+    io->b >>= 1;
+    io->c++;
 
-	return total_zeros;
+    return total_zeros;
 }
 
 /* Golomb-Rice, encode non-negative integer N, parameter M = 2^k */
-static void bio_write_gr(struct bio *bio, size_t k, uint32_t N)
+static void write_golomb(generic_io_t *io, size_t k, uint32_t N)
 {
-	uint32_t Q = N >> k;
+    assert(k < 32);
 
-	bio_write_unary(bio, Q);
-
-	assert(k <= 32);
-
-	bio_write_bits(bio, N, k);
+    write_unary(io, N >> k);
+    write_bits(io, N, k);
 }
 
-static uint32_t bio_read_gr(struct bio *bio, size_t k)
+static uint32_t read_golom(generic_io_t *io, size_t k)
 {
-	uint32_t Q = bio_read_unary(bio);
-	uint32_t N = Q << k;
-
-	assert(k <= 32);
-
-	N |= bio_read_bits(bio, k);
-
-	return N;
+    uint32_t N = read_unary(io) << k;
+    N |= read_bits(io, k);
+    return N;
 }
 
-void init()
+void x_init()
 {
-	opt_k = 3;
-	symbol_sum = 0;
-	symbol_count = 0;
+    opt_k = 3;
+    symbol_sum = 0;
+    symbol_count = 0;
 
-	for (int p = 0; p < 256; ++p) {
-		for (int i = 0; i < 256; ++i) {
-			table[p].sorted[i] = i;
-			table[p].freq[i] = 0;
-			table[p].order[i] = i;
-		}
-	}
+    for (int p = 0; p < 256; ++p) {
+        for (int i = 0; i < 256; ++i) {
+            table[p].sorted[i] = i;
+            table[p].freq[i] = 0;
+            table[p].order[i] = i;
+        }
+    }
 }
 
-static void swap_symbols(struct context *context, unsigned char c, unsigned char d)
+static void swap_symbols(struct context *ctx, uint8_t c, uint8_t d)
 {
-	assert(context != NULL);
+    assert(ctx != NULL);
 
-	unsigned char ic = context->order[c];
-	unsigned char id = context->order[d];
+    uint8_t ic = ctx->order[c], id = ctx->order[d];
 
-	assert(context->sorted[ic] == c);
-	assert(context->sorted[id] == d);
+    assert(ctx->sorted[ic] == c);
+    assert(ctx->sorted[id] == d);
 
-	context->sorted[ic] = d;
-	context->sorted[id] = c;
+    ctx->sorted[ic] = d;
+    ctx->sorted[id] = c;
 
-	context->order[c] = id;
-	context->order[d] = ic;
+    ctx->order[c] = id;
+    ctx->order[d] = ic;
 }
 
-static void increment_frequency(struct context *context, unsigned char c)
+static void increment_frequency(struct context *ctx, uint8_t c)
 {
-	assert(context != NULL);
+    assert(ctx != NULL);
 
-	unsigned char ic = context->order[c];
-	size_t freq_c = ++(context->freq[c]);
+    uint8_t ic = ctx->order[c];
+    size_t freq_c = ++(ctx->freq[c]);
 
-	unsigned char *pd;
+    uint8_t *pd;
+    for (pd = ctx->sorted + ic - 1; pd >= ctx->sorted; --pd) {
+        if (freq_c <= ctx->freq[*pd])
+            break;
+    }
 
-	for (pd = context->sorted + ic - 1; pd >= context->sorted; --pd) {
-		if (freq_c <= context->freq[*pd]) {
-			break;
-		}
-	}
-
-	unsigned char d = *(pd + 1);
-
-	if (c != d) {
-		swap_symbols(context, c, d);
-	}
+    uint8_t d = *(pd + 1);
+    if (c != d)
+        swap_symbols(ctx, c, d);
 }
 
-/* https://ipnpr.jpl.nasa.gov/progress_report/42-159/159E.pdf */
-static void update_model(unsigned char delta)
+/* Geometric probability mode.
+ * See https://ipnpr.jpl.nasa.gov/progress_report/42-159/159E.pdf
+ */
+static void update_model(uint8_t delta)
 {
-	if (symbol_count == RESET_INTERVAL) {
-		int k;
+    if (symbol_count == RESET_INTERVAL) {
+        int k;
 
-		/* 2^k <= E{r[k]} + 0 */
-		for (k = 1; (symbol_count << k) <= symbol_sum; ++k)
-			;
+        /* 2^k <= E{r[k]} + 0 */
+        for (k = 1; (symbol_count << k) <= symbol_sum; ++k)
+            ;
 
-		opt_k = k - 1;
+        opt_k = k - 1;
 
-		symbol_count = 0;
-		symbol_sum = 0;
-	}
+        symbol_count = 0;
+        symbol_sum = 0;
+    }
 
-	symbol_sum += delta;
-	symbol_count++;
+    symbol_sum += delta;
+    symbol_count++;
 }
 
-void *compress(void *iptr, size_t isize, void *optr)
+void *x_compress(void *iptr, size_t isize, void *optr)
 {
-	struct bio bio;
-	unsigned char *end = (unsigned char *)iptr + isize;
-	struct context *context = table + 0;
+    generic_io_t io;
+    uint8_t *end = (uint8_t *) iptr + isize;
+    struct context *ctx = table + 0;
 
-	bio_open(&bio, optr, NULL, BIO_MODE_WRITE);
+    initiate(&io, optr, NULL, WRITE_MODE);
 
-	for (unsigned char *iptrc = iptr; iptrc < end; ++iptrc) {
-		unsigned char c = *iptrc;
+    for (uint8_t *iptrc = iptr; iptrc < end; ++iptrc) {
+        uint8_t c = *iptrc;
 
-		/* get index */
-		unsigned char d = context->order[c];
+        /* get index */
+        uint8_t d = ctx->order[c];
 
-		bio_write_gr(&bio, opt_k, (uint32_t)d);
+        write_golomb(&io, opt_k, (uint32_t) d);
+        assert(c == ctx->sorted[d]);
 
-		assert(c == context->sorted[d]);
+        /* Update context model */
+        increment_frequency(ctx, c);
 
-		/* update context model */
-		increment_frequency(context, c);
+        /* Update Golomb-Rice model */
+        update_model(d);
+        ctx = table + c;
+    }
 
-		/* update Golomb-Rice model */
-		update_model(d);
+    /* EOF symbol */
+    write_golomb(&io, opt_k, 256);
 
-		context = table + c;
-	}
+    finalize(&io, WRITE_MODE);
 
-	/* EOF symbol */
-	bio_write_gr(&bio, opt_k, 256);
-
-	bio_close(&bio, BIO_MODE_WRITE);
-
-	return bio.ptr;
+    return io.ptr;
 }
 
-void *decompress(void *iptr, size_t isize, void *optr)
+void *x_decompress(void *iptr, size_t isize, void *optr)
 {
-	struct bio bio;
-	unsigned char *end = (unsigned char *)iptr + isize;
-	struct context *context = table + 0;
+    generic_io_t io;
+    uint8_t *end = (uint8_t *) iptr + isize;
+    struct context *ctx = table + 0;
 
-	bio_open(&bio, iptr, end, BIO_MODE_READ);
+    initiate(&io, iptr, end, READ_MODE);
 
-	unsigned char *optrc = optr;
+    uint8_t *optrc = optr;
 
-	for (;; ++optrc) {
-		uint32_t d = bio_read_gr(&bio, opt_k);
+    for (;; ++optrc) {
+        uint32_t d = read_golom(&io, opt_k);
 
-		if (d >= 256) {
-			break;
-		}
+        if (d >= 256)
+            break;
 
-		unsigned char c = context->sorted[d];
+        uint8_t c = ctx->sorted[d];
+        *optrc = c;
 
-		*optrc = c;
+        /* Update context model */
+        increment_frequency(ctx, c);
 
-		increment_frequency(context, c);
+        /* Update Golomb-Rice model */
+        update_model(d);
+        ctx = table + c;
+    }
 
-		update_model(d);
+    finalize(&io, READ_MODE);
 
-		context = table + c;
-	}
-
-	bio_close(&bio, BIO_MODE_READ);
-
-	return optrc;
+    return optrc;
 }

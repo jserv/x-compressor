@@ -1,4 +1,5 @@
 *.o
+*.o.d
 *.gcda
 gmon.out
 cachegrind.out.*
@@ -6,3 +7,4 @@ callgrind.out.*
 
 x
 unx
+74-0.txt

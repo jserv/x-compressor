@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-void init();
-void *compress(void *iptr, size_t isize, void *optr);
-void *decompress(void *iptr, size_t isize, void *optr);
+void x_init();
+void *x_compress(void *iptr, size_t isize, void *optr);
+void *x_decompress(void *iptr, size_t isize, void *optr);
 
-#endif /* LIBX_H_ */
+#endif
