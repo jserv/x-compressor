@@ -73,7 +73,7 @@ int main(int argc, char *argv[])
         if ((layer[0].data = malloc(8 * layer[1].size + 4096)) == NULL)
             abort();
 
-        fprintf(stderr, "Dompressing...\n");
+        fprintf(stderr, "Decompressing...\n");
         x_init();
 
         void *end = x_decompress(layer[1].data, layer[1].size, layer[0].data);
